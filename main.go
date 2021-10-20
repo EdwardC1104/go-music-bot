@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -9,12 +8,15 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/joho/godotenv"
-
 	"github.com/bwmarrin/discordgo"
+	"github.com/joho/godotenv"
+	"github.com/jonas747/dca"
+	"github.com/kkdai/youtube/v2"
+	// youtubeSearcher "github.com/lithdew/youtube"
 )
 
-var buffer = make([][]byte, 0)
+var voiceConnection *discordgo.VoiceConnection
+var songQueue = make(chan string)
 
 func main() {
 	err := godotenv.Load()
@@ -32,9 +34,6 @@ func main() {
 
 	bot.AddHandler(ready)
 	bot.AddHandler(messageCreate)
-	bot.AddHandler(guildCreate)
-
-	// bot.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsGuildVoiceStates
 
 	err = bot.Open()
 
@@ -61,100 +60,100 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 
-	if strings.HasPrefix(m.Content, "!play") {
-		c, err := s.State.Channel(m.ChannelID)
-		if err != nil {
-			return
-		}
-
-		g, err := s.State.Guild(c.GuildID)
-		if err != nil {
-			return
-		}
-
-		for _, vs := range g.VoiceStates {
-			if vs.UserID == m.Author.ID {
-				err = playSound(s, g.ID, vs.ChannelID)
-				if err != nil {
-					fmt.Println("Error playing sound:", err)
-				}
-
-				return
-			}
-		}
+	if strings.HasPrefix(m.Content, "!join") {
+		join(s, m)
+	} else if strings.HasPrefix(m.Content, "!leave") {
+		go leave()
+	} else if strings.HasPrefix(m.Content, "!add ") {
+		add(m.Content)
 	}
 
 }
 
-func guildCreate(s *discordgo.Session, event *discordgo.GuildCreate) {
-
-	if event.Guild.Unavailable {
+func join(s *discordgo.Session, m *discordgo.MessageCreate) {
+	c, err := s.State.Channel(m.ChannelID)
+	if err != nil {
 		return
 	}
 
-	for _, channel := range event.Guild.Channels {
-		if channel.ID == event.Guild.ID {
-			_, _ = s.ChannelMessageSend(channel.ID, "Music Bot is ready!")
+	g, err := s.State.Guild(c.GuildID)
+	if err != nil {
+		return
+	}
+
+	for _, vs := range g.VoiceStates {
+		if vs.UserID == m.Author.ID {
+			vc, err := s.ChannelVoiceJoin(g.ID, vs.ChannelID, false, true)
+			if err != nil {
+				fmt.Println("Error playing sound:", err)
+				return
+			}
+
+			go playback(vc)
+			voiceConnection = vc
+		}
+	}
+}
+
+func leave() {
+	voiceConnection.Disconnect()
+}
+
+func add(messageContent string) {
+	queryText := strings.ReplaceAll(messageContent, "!add ", "")
+
+	// results, err := youtubeSearcher.Search(queryText, 0)
+	// if err != nil {
+	// 	fmt.Println("Failed to serach youtube", err)
+	// 	return
+	// }
+	// songQueue <- string(results.Items[0].ID)
+	songQueue <- queryText
+}
+
+func playback(vc *discordgo.VoiceConnection) {
+	for {
+		songUrl := <-songQueue
+		fmt.Println(songUrl)
+		vc.Speaking(true)
+
+		options := dca.StdEncodeOptions
+		options.RawOutput = true
+		options.Bitrate = 96
+		options.Application = "lowdelay"
+
+		videoID := songUrl
+		client := youtube.Client{}
+
+		video, err := client.GetVideo(videoID)
+		if err != nil {
+			fmt.Println("Error getting video infomation", err)
 			return
 		}
-	}
-}
 
-func playSound(s *discordgo.Session, guildID, channelID string) (err error) {
-	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
-	if err != nil {
-		return err
-	}
-	vc.Speaking(true)
+		format := video.Formats.WithAudioChannels()
 
-	for _, buff := range buffer {
-		vc.OpusSend <- buff
-	}
-
-	vc.Speaking(false)
-	vc.Disconnect()
-	return nil
-}
-
-func loadSound() error {
-
-	file, err := os.Open("airhorn.dca")
-	if err != nil {
-		fmt.Println("Error opening dca file :", err)
-		return err
-	}
-
-	var opuslen int16
-
-	for {
-		// Read opus frame length from dca file.
-		err = binary.Read(file, binary.LittleEndian, &opuslen)
-
-		// If this is the end of the file, just return.
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			err := file.Close()
-			if err != nil {
-				return err
-			}
-			return nil
-		}
-
+		downloadURL, err := client.GetStreamURL(video, &format[0])
 		if err != nil {
-			fmt.Println("Error reading from dca file :", err)
-			return err
+			fmt.Println("Error getting video stream url", err)
+			return
 		}
 
-		// Read encoded pcm from dca file.
-		InBuf := make([]byte, opuslen)
-		err = binary.Read(file, binary.LittleEndian, &InBuf)
-
-		// Should not be any end of file errors
+		encodingSession, err := dca.EncodeFile(downloadURL, options)
 		if err != nil {
-			fmt.Println("Error reading from dca file :", err)
-			return err
+			fmt.Println("Error encoding the audio", err)
+			return
+		}
+		defer encodingSession.Cleanup()
+
+		done := make(chan error)
+		dca.NewStream(encodingSession, vc, done)
+		err = <-done
+		if err != nil && err != io.EOF {
+			fmt.Println("Error streaming to Discord", err)
+			return
 		}
 
-		// Append encoded pcm data to the buffer.
-		buffer = append(buffer, InBuf)
+		vc.Speaking(false)
 	}
 }
