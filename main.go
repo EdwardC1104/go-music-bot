@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -12,11 +13,11 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/jonas747/dca"
 	"github.com/kkdai/youtube/v2"
-	// youtubeSearcher "github.com/lithdew/youtube"
 )
 
 var voiceConnection *discordgo.VoiceConnection
 var songQueue = make(chan string)
+var streamer *dca.StreamingSession
 
 func main() {
 	err := godotenv.Load()
@@ -32,7 +33,7 @@ func main() {
 		panic(err)
 	}
 
-	bot.AddHandler(ready)
+	// bot.AddHandler(ready)
 	bot.AddHandler(messageCreate)
 
 	err = bot.Open()
@@ -50,10 +51,10 @@ func main() {
 	fmt.Println("Exited")
 }
 
-func ready(s *discordgo.Session, event *discordgo.Ready) {
-	s.UpdateStatus(0, "music")
-	fmt.Println("logged in as user " + string(s.State.User.ID))
-}
+// func ready(s *discordgo.Session, event *discordgo.Ready) {
+// 	// s.UpdateStatus(0, "for Messages")
+// 	fmt.Println("logged in as user " + string(s.State.User.ID))
+// }
 
 func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if m.Author.ID == s.State.User.ID {
@@ -61,11 +62,13 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 
 	if strings.HasPrefix(m.Content, "!join") {
-		join(s, m)
+		go join(s, m)
 	} else if strings.HasPrefix(m.Content, "!leave") {
 		go leave()
-	} else if strings.HasPrefix(m.Content, "!add ") {
-		add(m.Content)
+	} else if strings.HasPrefix(m.Content, "!play ") {
+		go add(m.Content)
+	} else if strings.HasPrefix(m.Content, "!skip ") {
+		go skip()
 	}
 
 }
@@ -100,15 +103,16 @@ func leave() {
 }
 
 func add(messageContent string) {
-	queryText := strings.ReplaceAll(messageContent, "!add ", "")
+	queryText := strings.ReplaceAll(messageContent, "!play ", "")
 
-	// results, err := youtubeSearcher.Search(queryText, 0)
-	// if err != nil {
-	// 	fmt.Println("Failed to serach youtube", err)
-	// 	return
-	// }
-	// songQueue <- string(results.Items[0].ID)
-	songQueue <- queryText
+	cmd := exec.Command("youtube-dl", "--get-id", "ytsearch1:"+queryText+"")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		fmt.Println(fmt.Sprint(err) + ": " + string(output))
+		return
+	}
+
+	songQueue <- strings.TrimSpace(string(output))
 }
 
 func playback(vc *discordgo.VoiceConnection) {
@@ -120,7 +124,10 @@ func playback(vc *discordgo.VoiceConnection) {
 		options := dca.StdEncodeOptions
 		options.RawOutput = true
 		options.Bitrate = 96
-		options.Application = "lowdelay"
+		options.Application = "audio"
+		options.FrameDuration = 20
+		options.BufferedFrames = 2048
+		options.Threads = 8
 
 		videoID := songUrl
 		client := youtube.Client{}
@@ -156,4 +163,8 @@ func playback(vc *discordgo.VoiceConnection) {
 
 		vc.Speaking(false)
 	}
+}
+
+func skip() {
+	streamer.SetPaused(true)
 }
